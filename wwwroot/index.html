@@ -1,0 +1,182 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SignalR Bug Reproduction</title>
+    <style>
+        body { font-family: Arial, sans-serif; padding: 20px; }
+        #log { 
+            height: 400px; 
+            overflow-y: auto; 
+            border: 1px solid #ccc; 
+            padding: 10px; 
+            margin-top: 20px;
+            background-color: #f7f7f7;
+            font-family: monospace;
+        }
+        .error { color: red; }
+        .info { color: blue; }
+        .success { color: green; }
+        button { 
+            padding: 10px 15px; 
+            margin-top: 10px;
+            cursor: pointer;
+        }
+    </style>
+</head>
+<body>
+    <h1>SignalR Bug Reproduction</h1>
+    <p>This page demonstrates the bug where a large response blocks the ping/keepalive mechanism in SignalR.</p>
+    
+    <div>
+        <label for="dataSize">Data Size (MB):</label>
+        <input type="number" id="dataSize" value="100" min="1" max="500">
+        <button id="connectBtn">Connect</button>
+        <button id="requestDataBtn" disabled>Request Large Data</button>
+        <button id="disconnectBtn" disabled>Disconnect</button>
+    </div>
+    
+    <div id="log"></div>
+    
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/microsoft-signalr/8.0.7/signalr.min.js"></script>
+    <script>
+        // DOM elements
+        const connectBtn = document.getElementById('connectBtn');
+        const requestDataBtn = document.getElementById('requestDataBtn');
+        const disconnectBtn = document.getElementById('disconnectBtn');
+        const dataSizeInput = document.getElementById('dataSize');
+        const logElement = document.getElementById('log');
+        
+        // Configuration
+        const CONNECTION_URL = "/hub";
+        
+        // Logging function
+        function log(message, type = 'info') {
+            const entry = document.createElement('div');
+            entry.classList.add(type);
+            entry.textContent = `[${new Date().toISOString()}] ${message}`;
+            logElement.appendChild(entry);
+            logElement.scrollTop = logElement.scrollHeight;
+            console.log(`[${type}] ${message}`);
+        }
+        
+        let connection;
+        
+        // Initialize connection
+        function initializeConnection() {
+            connection = new signalR.HubConnectionBuilder()
+                .withUrl(CONNECTION_URL, {
+                    transport: signalR.HttpTransportType.WebSockets // Force WebSockets
+                })
+                .withAutomaticReconnect([0, 2000, 5000, 10000, 30000])
+                .configureLogging(signalR.LogLevel.Trace)
+                .build();
+            
+            // Set up event handlers
+            connection.onclose(error => {
+                log(`Connection closed${error ? ': ' + error.message : ''}`, 'error');
+                updateButtonStates(false);
+            });
+            
+            connection.onreconnecting(error => {
+                log(`Connection lost, attempting to reconnect: ${error?.message || 'Unknown error'}`, 'error');
+            });
+            
+            connection.onreconnected(connectionId => {
+                log(`Reconnected with ID: ${connectionId}`, 'success');
+            });
+            
+            // Add a handler for the large data response
+            connection.on("ReceiveLargeData", (data) => {
+                const dataSize = (data.length / 1024 / 1024).toFixed(2);
+                log(`Starting to process large response (${dataSize} MB)...`, 'info');
+                
+                // Simulate slow client processing
+                // simulateSlowProcessing(data);
+            });
+            
+            // Make connection available for debugging
+            window.debugConnection = connection;
+        }
+        
+        // Simulate slow processing
+        function simulateSlowProcessing(data) {
+            const startTime = Date.now();
+            
+            // Process the data in small chunks to simulate slow processing
+            let processedBytes = 0;
+            const chunkSize = 1024; // 1KB
+            const delay = 100; // ms per chunk - adjust to trigger the bug reliably
+            
+            function processNextChunk() {
+                const chunk = data.substring(processedBytes, processedBytes + chunkSize);
+                processedBytes += chunk.length;
+                
+                // Do some dummy work with the chunk to simulate processing
+                const dummy = JSON.parse(JSON.stringify(chunk));
+                
+                // Log progress periodically
+                if (processedBytes % (1024 * 1024) === 0) { // Log every MB
+                    const percentComplete = (processedBytes / data.length * 100).toFixed(1);
+                    log(`Processed: ${(processedBytes / 1024 / 1024).toFixed(2)}MB / ${(data.length / 1024 / 1024).toFixed(2)}MB (${percentComplete}%)`);
+                }
+                
+                if (processedBytes < data.length) {
+                    setTimeout(processNextChunk, delay);
+                } else {
+                    const totalTime = (Date.now() - startTime) / 1000;
+                    log(`Finished processing large response in ${totalTime.toFixed(2)} seconds`, 'success');
+                }
+            }
+            
+            processNextChunk();
+        }
+        
+        // Button event handlers
+        connectBtn.addEventListener('click', async () => {
+            try {
+                initializeConnection();
+                log('Connecting to SignalR hub...');
+                await connection.start();
+                log(`Connected to SignalR hub. Connection ID: ${connection.connectionId}`, 'success');
+                updateButtonStates(true);
+            } catch (err) {
+                log(`Error establishing connection: ${err.message}`, 'error');
+            }
+        });
+        
+        requestDataBtn.addEventListener('click', async () => {
+            try {
+                const dataSize = parseInt(dataSizeInput.value, 10);
+                if (isNaN(dataSize) || dataSize < 1) {
+                    log('Please enter a valid data size', 'error');
+                    return;
+                }
+                
+                log(`Requesting ${dataSize}MB of data...`);
+                await connection.invoke("RequestLargeData", dataSize);
+            } catch (err) {
+                log(`Error requesting data: ${err.message}`, 'error');
+            }
+        });
+        
+        disconnectBtn.addEventListener('click', async () => {
+            try {
+                await connection.stop();
+                log('Disconnected from SignalR hub');
+                updateButtonStates(false);
+            } catch (err) {
+                log(`Error disconnecting: ${err.message}`, 'error');
+            }
+        });
+        
+        // Update button states based on connection
+        function updateButtonStates(connected) {
+            connectBtn.disabled = connected;
+            requestDataBtn.disabled = !connected;
+            disconnectBtn.disabled = !connected;
+        }
+    </script>
+</body>
+</html>
